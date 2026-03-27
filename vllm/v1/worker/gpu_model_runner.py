@@ -870,6 +870,15 @@ class GPUModelRunner(
     def _sync_device(self) -> None:
         torch.cuda.synchronize()
 
+    def _zero_block_ids(self, block_ids: list[int]) -> None:
+        if not block_ids:
+            return
+        unique_block_ids = torch.tensor(
+            sorted(set(block_ids)), dtype=torch.long, device=self.device
+        )
+        for cache_tensor in self.kv_caches:
+            cache_tensor.index_fill_(0, unique_block_ids, 0)
+
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler
         output.
@@ -892,6 +901,9 @@ class GPUModelRunner(
         # and handling the second as a new request.
         for req_id in scheduler_output.finished_req_ids:
             self.input_batch.remove_request(req_id)
+
+        if scheduler_output.new_block_ids_to_zero:
+            self._zero_block_ids(scheduler_output.new_block_ids_to_zero)
 
         # Free the cached encoder outputs.
         for mm_hash in scheduler_output.free_encoder_mm_hashes:
