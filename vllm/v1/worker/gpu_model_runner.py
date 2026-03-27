@@ -878,8 +878,20 @@ class GPUModelRunner(
         unique_block_ids = torch.tensor(
             sorted(set(block_ids)), dtype=torch.long, device=self.device
         )
-        for cache_tensor in self.kv_caches:
-            cache_tensor.index_fill_(0, unique_block_ids, 0)
+        max_block_id = int(unique_block_ids[-1].item())
+
+        def _zero_cache_entry(cache_entry: object) -> None:
+            if isinstance(cache_entry, torch.Tensor):
+                if cache_entry.ndim == 0 or cache_entry.shape[0] <= max_block_id:
+                    return
+                cache_entry.index_fill_(0, unique_block_ids, 0)
+                return
+            if isinstance(cache_entry, list):
+                for nested_entry in cache_entry:
+                    _zero_cache_entry(nested_entry)
+
+        for cache_entry in self.kv_caches:
+            _zero_cache_entry(cache_entry)
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler
