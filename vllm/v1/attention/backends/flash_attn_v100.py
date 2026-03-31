@@ -8,6 +8,7 @@ Decode uses a paged Flash V100 kernel that reads vLLM's KV cache directly.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import sys
 
@@ -36,12 +37,32 @@ _logged_prefill_flash = False
 _logged_decode_flash = False
 
 
-def _ensure_flash_attn_v100_on_path() -> bool:
-    candidate_roots = [
-        Path("/home/rah/flash-attention-v100"),
-        Path(__file__).resolve().parents[4] / "flash-attention-v100",
-    ]
+def _iter_flash_attn_v100_roots():
+    repo_root = Path(__file__).resolve().parents[4]
+    env_root = os.environ.get("FLASH_ATTN_V100_DIR")
+    candidate_roots = []
+    if env_root:
+        candidate_roots.append(Path(env_root).expanduser())
+    candidate_roots.extend([
+        repo_root.parent / "flash-attention-v100-ai-bond",
+        repo_root.parent / "flash-attention-v100",
+        repo_root / "flash-attention-v100-ai-bond",
+        repo_root / "flash-attention-v100",
+        Path.home() / "flash-attention-v100-ai-bond",
+        Path.home() / "flash-attention-v100",
+    ])
+
+    seen = set()
     for root in candidate_roots:
+        root = root.resolve()
+        if root in seen:
+            continue
+        seen.add(root)
+        yield root
+
+
+def _ensure_flash_attn_v100_on_path() -> bool:
+    for root in _iter_flash_attn_v100_roots():
         if not (root / "flash_attn_v100" / "__init__.py").exists():
             continue
         root_str = str(root)
@@ -51,40 +72,35 @@ def _ensure_flash_attn_v100_on_path() -> bool:
     return False
 
 
-def _get_flash_ops():
-    """Lazy-load flash_attn_v100 ops if available."""
-    global _flash_attn_func, _flash_attn_decode_paged
-    if _flash_attn_func is None or _flash_attn_decode_paged is None:
+def _import_flash_attn_v100_module():
+    try:
+        import flash_attn_v100 as flash_attn_v100_mod
+
+        return flash_attn_v100_mod
+    except ImportError:
+        if not _ensure_flash_attn_v100_on_path():
+            return None
         try:
             import flash_attn_v100 as flash_attn_v100_mod
 
+            return flash_attn_v100_mod
+        except ImportError:
+            return None
+
+
+def _get_flash_ops():
+    """Lazy-load flash_attn_v100 ops if available."""
+    global _flash_attn_func, _flash_attn_decode_paged
+    flash_attn_v100_mod = _import_flash_attn_v100_module()
+    if flash_attn_v100_mod is not None:
+        if _flash_attn_func is None:
             _flash_attn_func = getattr(flash_attn_v100_mod, "flash_attn_func", None)
+        if _flash_attn_decode_paged is None:
             _flash_attn_decode_paged = getattr(
                 flash_attn_v100_mod,
                 "flash_attn_decode_paged",
                 None,
             )
-        except ImportError:
-            if _ensure_flash_attn_v100_on_path():
-                try:
-                    import flash_attn_v100 as flash_attn_v100_mod
-
-                    _flash_attn_func = getattr(
-                        flash_attn_v100_mod,
-                        "flash_attn_func",
-                        None,
-                    )
-                    _flash_attn_decode_paged = getattr(
-                        flash_attn_v100_mod,
-                        "flash_attn_decode_paged",
-                        None,
-                    )
-                except ImportError:
-                    _flash_attn_func = None
-                    _flash_attn_decode_paged = None
-            else:
-                _flash_attn_func = None
-                _flash_attn_decode_paged = None
     return _flash_attn_func, _flash_attn_decode_paged
 
 
