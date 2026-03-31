@@ -5,14 +5,18 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     HF_HOME=/root/.cache/huggingface \
     VLLM_NO_USAGE_STATS=1 \
+    VLLM_ATTENTION_BACKEND=FLASH_ATTN_V100 \
     CUDA_HOME=/usr/local/cuda-12.8 \
     PATH=/usr/local/cuda-12.8/bin:$PATH \
     LD_LIBRARY_PATH=/usr/local/cuda-12.8/lib64:$LD_LIBRARY_PATH \
     VLLM_TARGET_DEVICE=cuda \
     VLLM_MAIN_CUDA_VERSION=12.8 \
+    FLASH_ATTN_V100_DIR=/opt/flash-attention-v100-ai-bond \
     TORCH_CUDA_ARCH_LIST=7.0 \
     MAX_JOBS=20 \
     NVCC_THREADS=1
+
+ARG FLASH_ATTN_V100_REPO=https://github.com/ai-bond/flash-attention-v100.git
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -56,10 +60,27 @@ WORKDIR /build
 
 COPY . /build/
 
-RUN rm -rf build vllm.egg-info .deps
+RUN rm -rf \
+        .deps \
+        _deps \
+        build \
+        build.ninja \
+        CMakeCache.txt \
+        CMakeFiles \
+        cmake_install.cmake \
+        CPackConfig.cmake \
+        CPackSourceConfig.cmake \
+        ctest \
+        detect_cuda_compute_capabilities.cu \
+        detect_cuda_version.cc \
+        dist-cu128-sm70 \
+        third_party \
+        vllm.egg-info \
+        .ninja_deps \
+        .ninja_log
 
-RUN git clone https://github.com/ai-bond/flash-attention-v100.git /tmp/flash-attention-v100 \
-    && cd /tmp/flash-attention-v100 \
+RUN git clone --depth 1 "${FLASH_ATTN_V100_REPO}" "${FLASH_ATTN_V100_DIR}" \
+    && cd "${FLASH_ATTN_V100_DIR}" \
     && sed -i 's/if not torch.cuda.is_available():/if False: # if not torch.cuda.is_available():/' setup.py \
     && MAX_JOBS=4 CUDA_HOME=/usr/local/cuda CMAKE_CUDA_ARCHITECTURES=70 TORCH_CUDA_ARCH_LIST="7.0" \
     pip3 install . --no-build-isolation --break-system-packages
@@ -71,5 +92,8 @@ RUN cd /build \
 WORKDIR /workspace
 EXPOSE 8000
 
-ENTRYPOINT ["tini", "--", "python3", "-m", "vllm.entrypoints.openai.api_server"]
+COPY docker/entrypoint.sm70.sh /usr/local/bin/entrypoint.sm70.sh
+RUN chmod +x /usr/local/bin/entrypoint.sm70.sh
+
+ENTRYPOINT ["tini", "--", "/usr/local/bin/entrypoint.sm70.sh"]
 CMD []

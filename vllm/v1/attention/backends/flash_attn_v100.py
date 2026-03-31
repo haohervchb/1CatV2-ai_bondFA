@@ -424,6 +424,24 @@ class FlashAttnV100Impl(TritonAttentionImpl):
                     output_scale,
                     output_block_scale,
                 )
+            if key.shape[1] == 0 or query.shape[1] % key.shape[1] != 0:
+                if not _warned_prefill_fallback:
+                    logger.warning(
+                        "FLASH_ATTN_V100 prefill fallback: unsupported Q/KV head "
+                        "layout for grouped attention. Using Triton for correctness."
+                    )
+                    _warned_prefill_fallback = True
+                return super().forward(
+                    layer,
+                    query,
+                    key,
+                    value,
+                    kv_cache,
+                    attn_metadata,
+                    output,
+                    output_scale,
+                    output_block_scale,
+                )
             if _has_prefix_context(attn_metadata):
                 if not _warned_prefill_fallback:
                     logger.warning(
@@ -491,12 +509,24 @@ class FlashAttnV100Impl(TritonAttentionImpl):
         attn_metadata: TritonAttentionMetadata,
         output: torch.Tensor,
     ) -> torch.Tensor:
-        """Prefill path for no-prefix case (query_len == seq_len per sequence)."""
+        """Prefill path for no-prefix case (query_len == seq_len per sequence).
+
+        Supports GQA/MQA by expanding K/V heads to match Q heads.
+        """
         num_actual_tokens = attn_metadata.num_actual_tokens
         query = query[:num_actual_tokens]
         key = key[:num_actual_tokens]
         value = value[:num_actual_tokens]
         out_view = output[:num_actual_tokens]
+
+        num_heads_q = query.shape[1]
+        num_heads_kv = key.shape[1]
+        needs_expansion = num_heads_q != num_heads_kv
+        if needs_expansion and num_heads_q % num_heads_kv != 0:
+            raise ValueError(
+                "FLASH_ATTN_V100 prefill requires query heads to be divisible "
+                f"by KV heads, got q={num_heads_q}, kv={num_heads_kv}."
+            )
 
         query_start_loc_cpu = getattr(attn_metadata, "query_start_loc_cpu", None)
         query_start_loc = (
@@ -510,10 +540,19 @@ class FlashAttnV100Impl(TritonAttentionImpl):
             if end <= start:
                 continue
 
+            q_seq = query[start:end].unsqueeze(0)
+            k_seq = key[start:end].unsqueeze(0)
+            v_seq = value[start:end].unsqueeze(0)
+
+            if needs_expansion:
+                repeat_factor = num_heads_q // num_heads_kv
+                k_seq = k_seq.repeat_interleave(repeat_factor, dim=2)
+                v_seq = v_seq.repeat_interleave(repeat_factor, dim=2)
+
             out_seq = self.flash_attn_func(
-                query[start:end].unsqueeze(0),
-                key[start:end].unsqueeze(0),
-                value[start:end].unsqueeze(0),
+                q_seq,
+                k_seq,
+                v_seq,
                 causal=True,
                 softmax_scale=self.scale,
             )
